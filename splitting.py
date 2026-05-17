@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import train_test_split
 
 
@@ -27,11 +28,16 @@ def split_data(
     test_size: float = 0.15,
     val_size: float = 0.15,
     random_state: int = 42,
+    n_splits: int = 5,
 ) -> list[tuple[np.ndarray, np.ndarray | None, np.ndarray]]:
     """Split dataset indices into train, validation, and test subsets.
 
-    The default strategy performs a single stratified random split preserving
-    the class ratio in each subset.
+    The default strategy performs stratified k-fold evaluation.  Each fold has
+    a held-out test fold plus a small validation split carved from the
+    remaining samples for threshold tuning.  This is more stable than a single
+    random split on a 689-example dataset, and ``solution.py`` will train the
+    final predictor on all labelled examples because every row appears in a
+    train/validation partition in at least one fold.
 
     Args:
         y:            Label array of shape ``(N,)`` with values in ``{0, 1}``.
@@ -41,6 +47,7 @@ def split_data(
         test_size:    Fraction of samples reserved for the held-out test set.
         val_size:     Fraction of samples reserved for validation.
         random_state: Random seed for reproducible splits.
+        n_splits:     Number of stratified folds to evaluate.
 
     Returns:
         A list of ``(idx_train, idx_val, idx_test)`` tuples of integer index
@@ -52,19 +59,26 @@ def split_data(
     """
 
     idx = np.arange(len(y))
+    min_class = int(np.bincount(y.astype(int), minlength=2).min())
+    n_splits = max(2, min(n_splits, min_class))
 
-    idx_train_val, idx_test = train_test_split(
-        idx,
-        test_size=test_size,
+    splitter = StratifiedKFold(
+        n_splits=n_splits,
+        shuffle=True,
         random_state=random_state,
-        stratify=y,
     )
-    relative_val = val_size / (1.0 - test_size)
-    idx_train, idx_val = train_test_split(
-        idx_train_val,
-        test_size=relative_val,
-        random_state=random_state,
-        stratify=y[idx_train_val],
-    )
-    return [(idx_train, idx_val, idx_test)]
 
+    splits: list[tuple[np.ndarray, np.ndarray | None, np.ndarray]] = []
+    for fold, (idx_train_val, idx_test) in enumerate(splitter.split(idx, y)):
+        # Keep the validation fraction comparable to the single-split baseline:
+        # val_size is interpreted as a fraction of the full dataset.
+        relative_val = min(0.5, val_size / (1.0 - (1.0 / n_splits)))
+        idx_train, idx_val = train_test_split(
+            idx_train_val,
+            test_size=relative_val,
+            random_state=random_state + fold,
+            stratify=y[idx_train_val],
+        )
+        splits.append((idx_train, idx_val, idx_test))
+
+    return splits
